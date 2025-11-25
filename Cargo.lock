@@ -859,7 +859,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyrule-node"
+name = "hyrulenode"
 version = "0.1.0"
 dependencies = [
  "anyhow",
