@@ -1,8 +1,12 @@
 [package]
-name = "hyrule-node"
+name = "hyrulenode"
 version = "0.1.0"
 edition = "2021"
 
+
+description = "The node for Hyrule"
+license = "MIT"
+repository = "https://github.com/LinkNavi/HyruleNode"
 [dependencies]
 # Web framework
 axum = { version = "0.7", features = ["macros"] }
