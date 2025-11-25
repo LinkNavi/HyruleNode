@@ -9,6 +9,8 @@ pub struct NodeConfig {
     pub public_key: String,
     pub private_key: String,
     pub hyrule_server: String,
+pub public_address: String,
+
     pub port: u16,
     pub storage_path: String,
     pub storage_capacity: u64,
@@ -43,6 +45,8 @@ impl NodeConfig {
             // Default to onion address
             hyrule_server: "http://hyrule4e3tu7pfdkvvca43senvgvgisi6einpe3d3kpidlk3uyjf7lqd.onion".to_string(),
             port: 8080,
+public_address: "hyrule4e3tu7pfdkvvca43senvgvgisi6einpe3d3kpidlk3uyjf7lqd.onion".to_string(),
+
             storage_path: "node-storage".to_string(),
             storage_capacity: 10 * 1024 * 1024 * 1024, // 10 GB
             is_anchor: false,

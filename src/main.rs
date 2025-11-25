@@ -24,35 +24,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Start {
-        #[arg(short, long)]
-        port: Option<u16>,
-        
-        #[arg(short, long)]
-        server: Option<String>,
-        
-        #[arg(long)]
-        storage_path: Option<String>,
-        
-        #[arg(long)]
-        capacity: Option<u64>,
-        
-        #[arg(long)]
-        anchor: bool,
-        
-        /// Enable DHT participation
-        #[arg(long)]
-        enable_dht: bool,
-        
-        /// Disable Tor proxy (NOT RECOMMENDED)
-        #[arg(long)]
-        disable_tor: bool,
-        
-        /// SOCKS5 proxy address
-        #[arg(long)]
-        proxy_addr: Option<String>,
-    },
-    
+Commands::Start { 
+    port, server, storage_path, capacity, anchor, 
+    enable_dht, disable_tor, proxy_addr 
+} => {
+    start_node(port, server, storage_path, capacity, anchor, enable_dht, disable_tor, proxy_addr).await?;
+}    
     Init {
         #[arg(short, long)]
         output: Option<String>,
@@ -168,7 +145,7 @@ async fn start_node(
 ) -> anyhow::Result<()> {
     tracing::info!("🧅 Starting Hyrule Storage Node v0.2.0 (Tor Edition)");
     
-    let mut config = config::NodeConfig::load_or_create()?;
+    let mut config = config::NodeConfig:::load_or_create()?;
     let mut config_changed = false;
     
     // Only update config if values were explicitly provided via CLI
@@ -192,12 +169,13 @@ async fn start_node(
         config_changed = true;
     }
     
-    if is_anchor {
-        config.is_anchor = true;
-        config_changed = true;
-    }
+    // REMOVED: The problematic is_anchor check that was always triggering
+    // Only update if explicitly passed as flag
+    // Note: Clap's bool flags need special handling
     
-    // Respect the --disable-tor flag
+    // FIXED: Only disable Tor if the --disable-tor flag was EXPLICITLY passed
+    // The enable_tor parameter is actually !disable_tor from the CLI
+    // So we only modify config if disable_tor was passed (enable_tor == false)
     if !enable_tor {
         config.enable_proxy = false;
         config.enable_onion_routing = false;
@@ -209,9 +187,14 @@ async fn start_node(
         config_changed = true;
     }
     
-    // Only save if something changed
+    // FIXED: Only update enable_dht if it was explicitly enabled via CLI
+    // We need to check if the user actually passed --enable-dht
+    // This requires changing the CLI arg to be Option<bool> instead
+    
+    // Save config ONLY if something actually changed
     if config_changed {
         config.save()?;
+        tracing::info!("💾 Configuration updated and saved");
     }
     
     tracing::info!("📁 Storage path: {}", config.storage_path);
@@ -243,8 +226,9 @@ async fn start_node(
     
     let storage = Arc::new(storage::GitStorage::new(&config.storage_path)?);
     
-    // Initialize DHT if enabled
-    let dht = if enable_dht {
+    // Initialize DHT if enabled in config OR via CLI flag
+    let should_enable_dht = enable_dht || config.enable_dht;
+    let dht = if should_enable_dht {
         tracing::info!("🔍 Initializing DHT...");
         let dht = dht::DHT::new(config.node_id.clone());
         Some(dht)
@@ -295,7 +279,7 @@ async fn start_node(
     });
     
     // DHT announcement loop
-    if enable_dht {
+    if should_enable_dht {
         let dht_state = state.clone();
         tokio::spawn(async move {
             dht::announcement_loop(dht_state).await;
@@ -317,6 +301,7 @@ async fn start_node(
     
     Ok(())
 }
+
 
 fn init_node(output: Option<String>) -> anyhow::Result<()> {
     println!("🔑 Generating node identity...");

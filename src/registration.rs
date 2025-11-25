@@ -22,7 +22,7 @@ pub async fn register_node(config: &NodeConfig) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
     
     // Get local IP address (or use configured address)
-    let address = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+let address = config.public_address.clone();
     
     let request = RegisterNodeRequest {
         node_id: config.node_id.clone(),
