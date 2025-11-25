@@ -35,32 +35,39 @@ impl ProxyConfig {
         }
     }
     
-    pub async fn init_tor_client(&mut self) -> Result<()> {
-        if !self.enabled {
-            return Ok(());
-        }
-        tracing::info!("🧅 Bootstrapping Arti Tor client...");
-        let config = TorClientConfig::default();
-        let runtime = TokioNativeTlsRuntime::current()?;
-        let tor_client = TorClient::with_runtime(runtime)
-            .config(config)
-            .create_bootstrapped()
-            .await?;
-        tracing::info!("✓ Arti Tor client bootstrapped successfully");
-        self.tor_client = Some(Arc::new(tor_client));
-        Ok(())
+pub async fn init_tor_client(&mut self) -> Result<()> {
+    if !self.enabled {
+        return Ok(());
     }
+    tracing::info!("🧅 Bootstrapping Arti Tor client...");
     
+    let config = TorClientConfig::default();
+    let runtime = TokioNativeTlsRuntime::current()?;
+    let tor_client = TorClient::with_runtime(runtime)
+        .config(config)
+        .create_bootstrapped()
+        .await?;
+    tracing::info!("✓ Arti Tor client bootstrapped successfully");
+    self.tor_client = Some(Arc::new(tor_client));
+    Ok(())
+}
     pub fn get_tor_client(&self) -> Option<Arc<TorClient<TokioNativeTlsRuntime>>> {
         self.tor_client.clone()
     }
     
     // CHANGED: Return HyruleClient instead of generic Hyper Client
+
 pub fn build_client(&self) -> Result<HyruleClient> {
-    if !self.enabled || self.tor_client.is_none() {
-        anyhow::bail!("Tor is not enabled or not initialized");
+    if !self.enabled {
+        anyhow::bail!("Tor is disabled in config");
+    }
+    
+    if self.tor_client.is_none() {
+        anyhow::bail!("Tor client not initialized - call init_tor_client() first");
     }
 
+    tracing::debug!("Building client with initialized Tor");
+    
     // deref Arc and clone to get TorClient
     let tor_client = (**self.tor_client.as_ref().unwrap()).clone();
 
@@ -80,17 +87,27 @@ pub fn build_client(&self) -> Result<HyruleClient> {
         self.build_client()
     }
 
-    // validate_tor_connection remains unchanged...
-    pub async fn validate_tor_connection(&self) -> Result<()> {
-        if !self.enabled || self.tor_client.is_none() {
-            anyhow::bail!("Tor is not enabled");
-        }
-        let tor_client = self.tor_client.as_ref().unwrap();
-        let test_addr = ("hyrule4e3tu7pfdkvvca43senvgvgisi6einpe3d3kpidlk3uyjf7lqd.onion", 80);
-        match tokio::time::timeout(std::time::Duration::from_secs(30), tor_client.connect(test_addr)).await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => anyhow::bail!("Tor connection failed: {}", e),
-            Err(_) => anyhow::bail!("Tor connection timed out"),
-        }
+pub async fn validate_tor_connection(&self) -> Result<()> {
+    if !self.enabled || self.tor_client.is_none() {
+        anyhow::bail!("Tor is not enabled");
     }
+    let tor_client = self.tor_client.as_ref().unwrap();
+    
+    // Create stream preferences that allow onion addresses
+    let mut prefs = arti_client::StreamPrefs::new();
+    prefs.connect_to_onion_services(arti_client::config::BoolOrAuto::Explicit(true));
+    
+    let test_addr = ("hyrule4e3tu7pfdkvvca43senvgvgisi6einpe3d3kpidlk3uyjf7lqd.onion", 80);
+    
+    // Increase timeout to 60 seconds for initial connection
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(60), 
+        tor_client.connect_with_prefs(test_addr, &prefs)
+    ).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => anyhow::bail!("Tor connection failed: {}", e),
+        Err(_) => anyhow::bail!("Tor connection timed out after 60s"),
+    }
+}
+
 }

@@ -73,17 +73,16 @@ pub fn create_router(state: NodeState) -> Router {
         .route("/status", get(get_status))
         .route("/health", get(health_check))
         .route("/repos", get(list_repos))
-        .route("/repos/:hash/objects/:id", get(get_object))
-        .route("/repos/:hash/objects", post(store_object))
-        .route("/repos/:hash/objects", get(list_objects))
-        .route("/repos/:hash/objects/batch", post(batch_store_objects))
-        .route("/repos/:hash/refs", post(update_ref))
-        .route("/repos/:hash/refs/:ref_name", get(get_ref))
-        .route("/repos/:hash/init", post(init_repo))
-        .route("/repos/:hash/pack", get(get_packfile))
+        .route("/repos/{hash}/objects/{id}", get(get_object))
+        .route("/repos/{hash}/objects", post(store_object))
+        .route("/repos/{hash}/objects", get(list_objects))
+        .route("/repos/{hash}/objects/batch", post(batch_store_objects))
+        .route("/repos/{hash}/refs", post(update_ref))
+        .route("/repos/{hash}/refs/{ref_name}", get(get_ref))
+        .route("/repos/{hash}/init", post(init_repo))
+        .route("/repos/{hash}/pack", get(get_packfile))
         .with_state(state)
 }
-
 async fn get_status(
     State(state): State<NodeState>,
 ) -> Result<Json<StatusResponse>, StatusCode> {

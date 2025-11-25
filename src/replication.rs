@@ -22,10 +22,12 @@ pub async fn replication_loop(state: NodeState) {
 }
 
 async fn check_and_replicate(state: &NodeState) -> anyhow::Result<()> {
-    let proxy_config = crate::proxy::ProxyConfig::from_config(&state.config);
-    // build_client() returns your HyruleClient wrapper
-    let client = proxy_config.build_client()?; // HyruleClient
+    // Use the initialized proxy from state instead of creating a new one
+    let client = state.proxy.build_client()?;
 
+    // get list of unhealthy repos from server
+    let url = format!("{}/api/repos?unhealthy=true", state.config.hyrule_server);
+    let response = client.get(&url).send().await?;
     // get list of unhealthy repos from server
     let url = format!("{}/api/repos?unhealthy=true", state.config.hyrule_server);
     let response = client.get(&url).send().await?;

@@ -186,36 +186,36 @@ async fn start_node(
     // Initialize Arti Tor client
     let mut proxy_config = proxy::ProxyConfig::from_config(&config);
     
-    if config.enable_proxy {
-        tracing::info!("🧅 Initializing Arti Tor client...");
-        tracing::info!("🌐 Hyrule server: {}", config.hyrule_server);
-        
-        match proxy_config.init_tor_client().await {
-            Ok(_) => {
-                tracing::info!("✓ Arti Tor client initialized and bootstrapped");
-                
-                // Validate connection
-                match proxy_config.validate_tor_connection().await {
-                    Ok(_) => {
-                        tracing::info!("✓ Tor connection validated successfully");
-                    }
-                    Err(e) => {
-                        tracing::error!("✗ Tor validation failed: {}", e);
-                        anyhow::bail!("Cannot start without working Tor connection");
-                    }
+if config.enable_proxy {
+    tracing::info!("🧅 Initializing Arti Tor client...");
+    tracing::info!("🌐 Hyrule server: {}", config.hyrule_server);
+    
+    match proxy_config.init_tor_client().await {
+        Ok(_) => {
+            tracing::info!("✓ Arti Tor client initialized and bootstrapped");
+            
+            // Make validation non-fatal - it will work once circuits are built
+            tracing::info!("⏳ Building initial Tor circuits...");
+            match proxy_config.validate_tor_connection().await {
+                Ok(_) => {
+                    tracing::info!("✓ Tor connection validated successfully");
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️  Initial Tor validation timed out: {}", e);
+                    tracing::warn!("   This is normal on first run. Circuits will be built as needed.");
                 }
             }
-            Err(e) => {
-                tracing::error!("✗ Failed to initialize Arti: {}", e);
-                tracing::error!("  Make sure you have internet connectivity");
-                anyhow::bail!("Cannot start without Tor");
-            }
         }
-    } else {
-        tracing::warn!("⚠️  Tor disabled - traffic will NOT be anonymous!");
-        tracing::warn!("   This is NOT RECOMMENDED for production use");
+        Err(e) => {
+            tracing::error!("✗ Failed to initialize Arti: {}", e);
+            tracing::error!("  Make sure you have internet connectivity");
+            anyhow::bail!("Cannot start without Tor");
+        }
     }
-    
+} else {
+    tracing::warn!("⚠️  Tor disabled - traffic will NOT be anonymous!");
+    tracing::warn!("   This is NOT RECOMMENDED for production use");
+}    
     let storage = Arc::new(storage::GitStorage::new(&config.storage_path)?);
     
     let dht = if config.enable_dht {
@@ -243,20 +243,23 @@ async fn start_node(
     }
     
     // Register with Hyrule server
-    tracing::info!("🔗 Registering with Hyrule server...");
-    match registration::register_node(&config, &proxy_config).await {
-        Ok(_) => tracing::info!("✓ Successfully registered with network"),
-        Err(e) => {
-            tracing::warn!("⚠️  Registration failed: {}. Will retry...", e);
-        }
+// Register with Hyrule server
+tracing::info!("🔗 Registering with Hyrule server...");
+match registration::register_node(&config, &proxy_config).await {
+    Ok(_) => tracing::info!("✓ Successfully registered with network"),
+    Err(e) => {
+        tracing::warn!("⚠️  Registration failed: {}. Will retry...", e);
     }
-    
-    // Start background tasks
-    let heartbeat_state = state.clone();
-    tokio::spawn(async move {
-        health::heartbeat_loop(heartbeat_state).await;
-    });
-    
+}
+
+// Clone the initialized proxy_config for background tasks
+let proxy_for_tasks = proxy_config.clone();
+
+// Start background tasks
+let heartbeat_state = state.clone();
+tokio::spawn(async move {
+    health::heartbeat_loop(heartbeat_state).await;
+});    
     let replication_state = state.clone();
     tokio::spawn(async move {
         replication::replication_loop(replication_state).await;

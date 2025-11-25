@@ -46,8 +46,8 @@ pub async fn heartbeat_loop(state: NodeState) {
 }
 
 async fn send_heartbeat(state: &NodeState) -> anyhow::Result<()> {
-    // Use Tor-enabled client
-    let client = state.proxy.build_tor_client()?;  // <-- make sure you use the Tor client
+    // Use the Tor client from state's proxy config
+    let client = state.proxy.build_client()?;
 
     let storage_used = state.storage.get_storage_usage()? as i64;
     let hosted_repos = state.hosted_repos.read().await.clone();
@@ -70,7 +70,6 @@ async fn send_heartbeat(state: &NodeState) -> anyhow::Result<()> {
         .send()
         .await?;
 
-    // Capture both status and body before checking success
     let status = response.status();
     let body = response.text().await?;
     tracing::info!("Heartbeat response: {} {:?}", status, body);
@@ -81,7 +80,6 @@ async fn send_heartbeat(state: &NodeState) -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 async fn verify_all_repos(state: &NodeState) -> anyhow::Result<()> {
     tracing::info!(" Starting storage verification...");
