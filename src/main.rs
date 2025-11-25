@@ -1,4 +1,4 @@
-// Node/src/main.rs - Upgraded version
+// Node/src/main.rs - Upgraded version with Tor support
 mod config;
 mod storage;
 mod api;
@@ -25,17 +25,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Start {
-        #[arg(short, long, default_value = "8080")]
-        port: u16,
+        #[arg(short, long)]
+        port: Option<u16>,
         
-        #[arg(short, long, default_value = "http://localhost:3000")]
-        server: String,
+        #[arg(short, long)]
+        server: Option<String>,
         
-        #[arg(long, default_value = "node-storage")]
-        storage_path: String,
+        #[arg(long)]
+        storage_path: Option<String>,
         
-        #[arg(long, default_value = "10")]
-        capacity: u64,
+        #[arg(long)]
+        capacity: Option<u64>,
         
         #[arg(long)]
         anchor: bool,
@@ -44,13 +44,13 @@ enum Commands {
         #[arg(long)]
         enable_dht: bool,
         
-        /// Enable SOCKS5 proxy support
+        /// Disable Tor proxy (NOT RECOMMENDED)
         #[arg(long)]
-        enable_proxy: bool,
+        disable_tor: bool,
         
         /// SOCKS5 proxy address
-        #[arg(long, default_value = "127.0.0.1:9050")]
-        proxy_addr: String,
+        #[arg(long)]
+        proxy_addr: Option<String>,
     },
     
     Init {
@@ -86,6 +86,9 @@ enum Commands {
         #[arg(short, long, default_value = "query")]
         action: String,
     },
+    
+    /// Test Tor connection
+    TestTor,
 }
 
 #[derive(Clone)]
@@ -120,9 +123,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Start { 
             port, server, storage_path, capacity, anchor, 
-            enable_dht, enable_proxy, proxy_addr 
+            enable_dht, disable_tor, proxy_addr 
         } => {
-            start_node(port, server, storage_path, capacity, anchor, enable_dht, enable_proxy, proxy_addr).await?;
+            start_node(port, server, storage_path, capacity, anchor, enable_dht, !disable_tor, proxy_addr).await?;
         }
         Commands::Init { output } => {
             init_node(output)?;
@@ -145,47 +148,104 @@ async fn main() -> anyhow::Result<()> {
         Commands::DhtTest { repo_hash, action } => {
             test_dht(repo_hash, action).await?;
         }
+        Commands::TestTor => {
+            test_tor().await?;
+        }
     }
     
     Ok(())
 }
 
 async fn start_node(
-    port: u16,
-    server: String,
-    storage_path: String,
-    capacity_gb: u64,
+    port: Option<u16>,
+    server: Option<String>,
+    storage_path: Option<String>,
+    capacity_gb: Option<u64>,
     is_anchor: bool,
     enable_dht: bool,
-    enable_proxy: bool,
-    proxy_addr: String,
+    enable_tor: bool,
+    proxy_addr: Option<String>,
 ) -> anyhow::Result<()> {
-    tracing::info!(" Starting Hyrule Storage Node v0.2.0");
+    tracing::info!("🧅 Starting Hyrule Storage Node v0.2.0 (Tor Edition)");
     
     let mut config = config::NodeConfig::load_or_create()?;
-    config.hyrule_server = server.clone();
-    config.port = port;
-    config.storage_path = storage_path.clone();
-    config.storage_capacity = capacity_gb * 1024 * 1024 * 1024;
-    config.is_anchor = is_anchor;
-    config.enable_proxy = enable_proxy;
-    config.proxy_addr = Some(proxy_addr);
-    config.save()?;
+    let mut config_changed = false;
     
-    tracing::info!(" Storage path: {}", config.storage_path);
-    tracing::info!(" Capacity: {} GB", capacity_gb);
-    tracing::info!(" Node ID: {}", &config.node_id[..16]);
-    tracing::info!(" Type: {}", if is_anchor { "Anchor Node" } else { "P2P Node" });
+    // Only update config if values were explicitly provided via CLI
+    if let Some(srv) = server {
+        config.hyrule_server = srv;
+        config_changed = true;
+    }
     
-    if enable_proxy {
-        tracing::info!(" Proxy enabled: {}", config.proxy_addr.as_ref().unwrap());
+    if let Some(p) = port {
+        config.port = p;
+        config_changed = true;
+    }
+    
+    if let Some(path) = storage_path {
+        config.storage_path = path;
+        config_changed = true;
+    }
+    
+    if let Some(cap) = capacity_gb {
+        config.storage_capacity = cap * 1024 * 1024 * 1024;
+        config_changed = true;
+    }
+    
+    if is_anchor {
+        config.is_anchor = true;
+        config_changed = true;
+    }
+    
+    // Respect the --disable-tor flag
+    if !enable_tor {
+        config.enable_proxy = false;
+        config.enable_onion_routing = false;
+        config_changed = true;
+    }
+    
+    if let Some(addr) = proxy_addr {
+        config.proxy_addr = Some(addr);
+        config_changed = true;
+    }
+    
+    // Only save if something changed
+    if config_changed {
+        config.save()?;
+    }
+    
+    tracing::info!("📁 Storage path: {}", config.storage_path);
+    tracing::info!("💾 Capacity: {:.2} GB", config.storage_capacity as f64 / 1e9);
+    tracing::info!("🆔 Node ID: {}", &config.node_id[..16]);
+    tracing::info!("🏷️  Type: {}", if config.is_anchor { "Anchor Node" } else { "P2P Node" });
+    
+    if config.enable_proxy {
+        tracing::info!("🧅 Tor enabled: {}", config.proxy_addr.as_ref().unwrap());
+        tracing::info!("🌐 Hyrule server: {}", config.hyrule_server);
+        
+        // Validate Tor connection
+        let proxy_config = proxy::ProxyConfig::from_config(&config);
+        match proxy_config.validate_tor_connection().await {
+            Ok(_) => {
+                tracing::info!("✓ Tor connection validated successfully");
+            }
+            Err(e) => {
+                tracing::error!("✗ Tor validation failed: {}", e);
+                tracing::error!("  Make sure Tor is running on {}", config.proxy_addr.as_ref().unwrap());
+                tracing::error!("  Install Tor: https://www.torproject.org/download/");
+                anyhow::bail!("Cannot start without working Tor connection");
+            }
+        }
+    } else {
+        tracing::warn!("⚠️  Tor disabled - traffic will NOT be anonymous!");
+        tracing::warn!("   This is NOT RECOMMENDED for production use");
     }
     
     let storage = Arc::new(storage::GitStorage::new(&config.storage_path)?);
     
     // Initialize DHT if enabled
     let dht = if enable_dht {
-        tracing::info!(" Initializing DHT...");
+        tracing::info!("🔍 Initializing DHT...");
         let dht = dht::DHT::new(config.node_id.clone());
         Some(dht)
     } else {
@@ -205,14 +265,17 @@ async fn start_node(
         let repos = storage.list_hosted_repos()?;
         let mut hosted = state.hosted_repos.write().await;
         *hosted = repos;
-        tracing::info!(" Loaded {} existing repositories", hosted.len());
+        tracing::info!("📦 Loaded {} existing repositories", hosted.len());
     }
     
     // Register with Hyrule server
-    tracing::info!(" Registering with Hyrule server: {}", server);
+    tracing::info!("🔗 Registering with Hyrule server...");
     match registration::register_node(&config).await {
-        Ok(_) => tracing::info!(" Successfully registered with network"),
-        Err(e) => tracing::warn!(" Registration failed: {}. Will retry...", e),
+        Ok(_) => tracing::info!("✓ Successfully registered with network"),
+        Err(e) => {
+            tracing::warn!("⚠️  Registration failed: {}. Will retry...", e);
+            tracing::warn!("   Make sure Tor is running and the onion address is accessible");
+        }
     }
     
     // Start background tasks
@@ -243,9 +306,11 @@ async fn start_node(
     let app = api::create_router(state)
         .layer(TraceLayer::new_for_http());
     
-    let addr = format!("0.0.0.0:{}", port);
-    tracing::info!(" Node listening on {}", addr);
-    tracing::info!(" Status: http://localhost:{}/status", port);
+    let addr = format!("0.0.0.0:{}", config.port);
+    tracing::info!("🚀 Node listening on {}", addr);
+    tracing::info!("📊 Status: http://localhost:{}/status", config.port);
+    tracing::info!("");
+    tracing::info!("✓ Node is ready to accept connections");
     
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
@@ -254,7 +319,7 @@ async fn start_node(
 }
 
 fn init_node(output: Option<String>) -> anyhow::Result<()> {
-    println!(" Generating node identity...");
+    println!("🔑 Generating node identity...");
     
     let config = config::NodeConfig::generate();
     
@@ -271,22 +336,28 @@ fn init_node(output: Option<String>) -> anyhow::Result<()> {
     let config_str = toml::to_string_pretty(&config)?;
     std::fs::write(&config_path, config_str)?;
     
-    println!(" Node identity created!");
+    println!("✓ Node identity created!");
     println!();
     println!("Node ID: {}", config.node_id);
     println!("Public Key: {}", config.public_key);
+    println!("Hyrule Server: {}", config.hyrule_server);
+    println!("Tor Proxy: {} (enabled: {})", config.proxy_addr.as_ref().unwrap(), config.enable_proxy);
     println!();
     println!("Config saved to: {}", config_path.display());
     println!();
+    println!("⚠️  Make sure Tor is installed and running:");
+    println!("   - Install: https://www.torproject.org/download/");
+    println!("   - Default port: 9050");
+    println!();
     println!("Start your node with:");
-    println!("  hyrule-node start --port 8080");
+    println!("  hyrule-node start");
     
     Ok(())
 }
 
 async fn show_status() -> anyhow::Result<()> {
-    println!(" Node Status");
-    println!("");
+    println!("📊 Node Status");
+    println!();
     
     let config = config::NodeConfig::load()?;
     let storage = storage::GitStorage::new(&config.storage_path)?;
@@ -295,6 +366,7 @@ async fn show_status() -> anyhow::Result<()> {
     println!("Port: {}", config.port);
     println!("Type: {}", if config.is_anchor { "Anchor" } else { "P2P" });
     println!("Storage: {}", config.storage_path);
+    println!("Hyrule Server: {}", config.hyrule_server);
     
     let usage = storage.get_storage_usage()?;
     let capacity = config.storage_capacity;
@@ -310,15 +382,17 @@ async fn show_status() -> anyhow::Result<()> {
     println!("Repositories: {}", repos.len());
     
     if config.enable_proxy {
-        println!("Proxy: Enabled ({})", config.proxy_addr.as_ref().unwrap());
+        println!("🧅 Tor: Enabled ({})", config.proxy_addr.as_ref().unwrap());
+    } else {
+        println!("⚠️  Tor: Disabled");
     }
     
     Ok(())
 }
 
 async fn list_repos() -> anyhow::Result<()> {
-    println!(" Hosted Repositories");
-    println!("");
+    println!("📦 Hosted Repositories");
+    println!();
     
     let config = config::NodeConfig::load()?;
     let storage = storage::GitStorage::new(&config.storage_path)?;
@@ -343,7 +417,7 @@ async fn list_repos() -> anyhow::Result<()> {
 }
 
 async fn serve_repo(repo_hash: String) -> anyhow::Result<()> {
-    println!(" Adding repository to serving list...");
+    println!("📤 Adding repository to serving list...");
     
     let config = config::NodeConfig::load()?;
     let storage = storage::GitStorage::new(&config.storage_path)?;
@@ -351,11 +425,13 @@ async fn serve_repo(repo_hash: String) -> anyhow::Result<()> {
     // Initialize if not exists
     if !storage.repo_path(&repo_hash).exists() {
         storage.init_repo(&repo_hash)?;
-        println!(" Initialized local storage for {}", &repo_hash[..16]);
+        println!("✓ Initialized local storage for {}", &repo_hash[..16]);
     }
     
-    // Announce to network
-    let client = reqwest::Client::new();
+    // Build client with Tor support
+    let proxy_config = proxy::ProxyConfig::from_config(&config);
+    let client = proxy_config.build_client()?;
+    
     let url = format!("{}/api/repos/{}/replicate", config.hyrule_server, repo_hash);
     
     #[derive(serde::Serialize)]
@@ -370,29 +446,25 @@ async fn serve_repo(repo_hash: String) -> anyhow::Result<()> {
     let response = client.post(&url).json(&req).send().await?;
     
     if response.status().is_success() {
-        println!(" Successfully announced to network");
+        println!("✓ Successfully announced to network");
     } else {
-        println!(" Failed to announce: {}", response.status());
+        println!("✗ Failed to announce: {}", response.status());
     }
     
     Ok(())
 }
 
 async fn unserve_repo(repo_hash: String) -> anyhow::Result<()> {
-    println!(" Removing repository from serving list...");
+    println!("📥 Removing repository from serving list...");
     
-    let config = config::NodeConfig::load()?;
-    let storage = storage::GitStorage::new(&config.storage_path)?;
-    
-    // Don't delete data, just stop announcing
-    println!(" Repository {} no longer advertised", &repo_hash[..16]);
+    println!("✓ Repository {} no longer advertised", &repo_hash[..16]);
     println!("  (Data preserved in storage)");
     
     Ok(())
 }
 
 async fn verify_storage(repo_hash: Option<String>) -> anyhow::Result<()> {
-    println!(" Verifying storage integrity...");
+    println!("🔍 Verifying storage integrity...");
     
     let config = config::NodeConfig::load()?;
     let storage = storage::GitStorage::new(&config.storage_path)?;
@@ -416,11 +488,11 @@ async fn verify_storage(repo_hash: Option<String>) -> anyhow::Result<()> {
             match storage.verify_object(&repo, &object_id) {
                 Ok(true) => {},
                 Ok(false) => {
-                    println!("   Corrupted: {}", &object_id[..8]);
+                    println!("   ✗ Corrupted: {}", &object_id[..8]);
                     corrupted += 1;
                 }
                 Err(e) => {
-                    println!("   Error reading {}: {}", &object_id[..8], e);
+                    println!("   ✗ Error reading {}: {}", &object_id[..8], e);
                     corrupted += 1;
                 }
             }
@@ -428,21 +500,21 @@ async fn verify_storage(repo_hash: Option<String>) -> anyhow::Result<()> {
     }
     
     println!();
-    println!("");
+    println!("═══════════════════════");
     println!("Total objects: {}", total_objects);
     println!("Corrupted: {}", corrupted);
     
     if corrupted == 0 {
-        println!(" All objects verified successfully!");
+        println!("✓ All objects verified successfully!");
     } else {
-        println!(" Found {} corrupted objects", corrupted);
+        println!("✗ Found {} corrupted objects", corrupted);
     }
     
     Ok(())
 }
 
 async fn test_dht(repo_hash: String, action: String) -> anyhow::Result<()> {
-    println!(" Testing DHT functionality...");
+    println!("🔍 Testing DHT functionality...");
     
     let config = config::NodeConfig::load()?;
     let mut dht = dht::DHT::new(config.node_id.clone());
@@ -450,7 +522,7 @@ async fn test_dht(repo_hash: String, action: String) -> anyhow::Result<()> {
     match action.as_str() {
         "announce" => {
             dht.announce_content(&repo_hash, &config.node_id);
-            println!(" Announced {} to DHT", &repo_hash[..16]);
+            println!("✓ Announced {} to DHT", &repo_hash[..16]);
         }
         "query" => {
             let nodes = dht.query_content(&repo_hash);
@@ -460,8 +532,44 @@ async fn test_dht(repo_hash: String, action: String) -> anyhow::Result<()> {
             }
         }
         _ => {
-            println!(" Unknown action: {}", action);
+            println!("✗ Unknown action: {}", action);
             println!("   Use: announce or query");
+        }
+    }
+    
+    Ok(())
+}
+
+async fn test_tor() -> anyhow::Result<()> {
+    println!("🧅 Testing Tor connection...");
+    println!();
+    
+    let config = config::NodeConfig::load()?;
+    let proxy_config = proxy::ProxyConfig::from_config(&config);
+    
+    if !proxy_config.enabled {
+        println!("✗ Tor is disabled in config");
+        println!("  Enable it by setting enable_proxy = true");
+        return Ok(());
+    }
+    
+    println!("Tor proxy: {}", proxy_config.addr);
+    println!("Connecting...");
+    
+    match proxy_config.validate_tor_connection().await {
+        Ok(_) => {
+            println!();
+            println!("✓ Tor connection successful!");
+            println!("  Your traffic is being routed through the Tor network");
+        }
+        Err(e) => {
+            println!();
+            println!("✗ Tor connection failed: {}", e);
+            println!();
+            println!("Troubleshooting:");
+            println!("  1. Make sure Tor is installed and running");
+            println!("  2. Check that Tor is listening on {}", proxy_config.addr);
+            println!("  3. Verify your firewall allows connections to Tor");
         }
     }
     

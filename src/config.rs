@@ -40,15 +40,17 @@ impl NodeConfig {
             node_id,
             public_key: hex::encode(public_key_bytes),
             private_key: hex::encode(private_key_bytes),
-            hyrule_server: "http://localhost:3000".to_string(),
+            // Default to onion address
+            hyrule_server: "http://hyrule4e3tu7pfdkvvca43senvgvgisi6einpe3d3kpidlk3uyjf7lqd.onion".to_string(),
             port: 8080,
             storage_path: "node-storage".to_string(),
             storage_capacity: 10 * 1024 * 1024 * 1024, // 10 GB
             is_anchor: false,
             max_bandwidth_mbps: 100,
-            enable_proxy: false,
+            // Enable proxy by default for Tor
+            enable_proxy: true,
             proxy_addr: Some("127.0.0.1:9050".to_string()),
-            enable_onion_routing: false,
+            enable_onion_routing: true,
             enable_dht: true,
             auto_replicate: true,
             max_concurrent_uploads: 5,
