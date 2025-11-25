@@ -1,7 +1,7 @@
 // ============================================================================
 // Node/src/proxy.rs - Tor Proxy Support Module
 // ============================================================================
-
+#[derive(Clone)]
 pub struct ProxyConfig {
     pub enabled: bool,
     pub addr: String,
@@ -63,7 +63,7 @@ addr: if config.proxy_addr.is_empty() {
             anyhow::bail!("Tor proxy is not enabled");
         }
         
-        let client = self.build_client()?;
+        let client = self.build_tor_client()?;
         
         // Try to connect to check.torproject.org to verify Tor connection
         tracing::info!("Validating Tor connection...");

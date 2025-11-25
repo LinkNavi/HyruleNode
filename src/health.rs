@@ -46,34 +46,42 @@ pub async fn heartbeat_loop(state: NodeState) {
 }
 
 async fn send_heartbeat(state: &NodeState) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
-    
+    // Use Tor-enabled client
+    let client = state.proxy.build_tor_client()?;  // <-- make sure you use the Tor client
+
     let storage_used = state.storage.get_storage_usage()? as i64;
     let hosted_repos = state.hosted_repos.read().await.clone();
-    
+
     let request = HeartbeatRequest {
         node_id: state.config.node_id.clone(),
         storage_used,
         hosted_repos: hosted_repos.clone(),
     };
-    
+
     let url = format!("{}/api/nodes/heartbeat", state.config.hyrule_server);
-    
+
+    tracing::info!("Sending heartbeat to {}", url);
+    tracing::debug!("Payload: {:?}", &request);
+
     let response = client
         .post(&url)
         .json(&request)
-        .timeout(Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await?;
-    
-    if !response.status().is_success() {
-        tracing::warn!("Heartbeat rejected: {}", response.status());
-    } else {
-        tracing::debug!("Heartbeat sent - hosting {} repos", hosted_repos.len());
+
+    // Capture both status and body before checking success
+    let status = response.status();
+    let body = response.text().await?;
+    tracing::info!("Heartbeat response: {} {:?}", status, body);
+
+    if !status.is_success() {
+        anyhow::bail!("Heartbeat rejected: {} - body: {}", status, body);
     }
-    
+
     Ok(())
 }
+
 
 async fn verify_all_repos(state: &NodeState) -> anyhow::Result<()> {
     tracing::info!(" Starting storage verification...");

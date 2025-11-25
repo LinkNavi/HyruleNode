@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
-
+use arti_client::TorClient;
 #[derive(Parser)]
 #[command(name = "hyrule-node")]
 #[command(version, about = "Distributed storage node for Hyrule network")]
@@ -88,14 +88,17 @@ enum Commands {
     /// Test Tor connection
     TestTor,
 }
+
 #[derive(Clone)]
 pub struct NodeState {
-    config: config::NodeConfig,
-    storage: Arc<storage::GitStorage>,
-    hosted_repos: Arc<RwLock<Vec<String>>>,
-    stats: Arc<RwLock<NodeStats>>,
-    dht: Arc<RwLock<Option<dht::DHT>>>,
+    pub config: config::NodeConfig,
+    pub storage: Arc<storage::GitStorage>,
+    pub hosted_repos: Arc<RwLock<Vec<String>>>,
+    pub stats: Arc<RwLock<NodeStats>>,
+    pub dht: Arc<RwLock<Option<dht::DHT>>>,
+    pub proxy: crate::proxy::ProxyConfig,   // <-- Add this
 }
+
 
 #[derive(Default, Clone)]
 pub struct NodeStats {
@@ -228,14 +231,16 @@ async fn start_node(
     } else {
         None
     };
-    
-    let state = NodeState {
+ let proxy_config = crate::proxy::ProxyConfig::from_config(&config);   
+ let state = NodeState {
         config: config.clone(),
         storage: storage.clone(),
         hosted_repos: Arc::new(RwLock::new(Vec::new())),
         stats: Arc::new(RwLock::new(NodeStats::default())),
         dht: Arc::new(RwLock::new(dht)),
+proxy: proxy_config.clone(),
     };
+
     
     // Load existing repos
     {
