@@ -1,4 +1,5 @@
-// Node/src/main.rs - Upgraded version with Tor support
+// Node/src/main.rs - Upgraded version with Arti Tor support
+mod http_client;
 mod config;
 mod storage;
 mod api;
@@ -13,7 +14,7 @@ use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::trace::TraceLayer;
-use arti_client::TorClient;
+
 #[derive(Parser)]
 #[command(name = "hyrule-node")]
 #[command(version, about = "Distributed storage node for Hyrule network")]
@@ -24,7 +25,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the node
     Start {
         #[arg(short, long)]
         port: Option<u16>,
@@ -59,15 +59,11 @@ enum Commands {
     Status,
     Repos,
     
-    /// Serve a specific repository
     Serve {
-        /// Repository hash to serve
         repo_hash: String,
     },
     
-    /// Stop serving a repository
     Unserve {
-        /// Repository hash to stop serving
         repo_hash: String,
     },
     
@@ -75,17 +71,13 @@ enum Commands {
         repo_hash: Option<String>,
     },
     
-    /// Test DHT functionality
     DhtTest {
-        /// Repository hash to announce/query
         repo_hash: String,
         
-        /// Action: announce or query
         #[arg(short, long, default_value = "query")]
         action: String,
     },
     
-    /// Test Tor connection
     TestTor,
 }
 
@@ -96,9 +88,8 @@ pub struct NodeState {
     pub hosted_repos: Arc<RwLock<Vec<String>>>,
     pub stats: Arc<RwLock<NodeStats>>,
     pub dht: Arc<RwLock<Option<dht::DHT>>>,
-    pub proxy: crate::proxy::ProxyConfig,   // <-- Add this
+    pub proxy: crate::proxy::ProxyConfig,
 }
-
 
 #[derive(Default, Clone)]
 pub struct NodeStats {
@@ -161,33 +152,26 @@ async fn start_node(
     server: Option<String>,
     storage_path: Option<String>,
     capacity_gb: Option<u64>,
-    is_anchor: bool,
-    enable_dht: bool,
+    _is_anchor: bool,
+    _enable_dht: bool,
     enable_tor: bool,
     proxy_addr: Option<String>,
 ) -> anyhow::Result<()> {
-    tracing::info!("🧅 Starting Hyrule Storage Node v0.2.0 (Tor Edition)");
+    tracing::info!("🧅 Starting Hyrule Storage Node v0.3.0 (Arti Edition)");
     
-    // Load existing config - this will NOT override values
     let mut config = config::NodeConfig::load_or_create()?;
     
-    // Determine if --disable-tor was explicitly passed
-    // enable_tor parameter represents the OPPOSITE of --disable-tor flag
-    // So if enable_tor is false, it means --disable-tor was passed
     let disable_tor_flag_passed = !enable_tor;
     
-    // Update config ONLY with explicitly provided CLI arguments
-    // Note: is_anchor and enable_dht are always passed by clap even if not specified
-    // So we need to check if they're different from current config
     let config_changed = config.update_and_save(
         server,
         port,
         storage_path,
         capacity_gb,
-        None, // Don't auto-update is_anchor unless explicitly needed
+        None,
         if disable_tor_flag_passed { Some(false) } else { None },
         proxy_addr,
-        None, // Don't auto-update enable_dht unless explicitly needed
+        None,
     )?;
     
     if config_changed {
@@ -199,21 +183,32 @@ async fn start_node(
     tracing::info!("🆔 Node ID: {}", &config.node_id[..16]);
     tracing::info!("🏷️  Type: {}", if config.is_anchor { "Anchor Node" } else { "P2P Node" });
     
+    // Initialize Arti Tor client
+    let mut proxy_config = proxy::ProxyConfig::from_config(&config);
+    
     if config.enable_proxy {
-        tracing::info!("🧅 Tor enabled: {}", config.proxy_addr);
+        tracing::info!("🧅 Initializing Arti Tor client...");
         tracing::info!("🌐 Hyrule server: {}", config.hyrule_server);
         
-        // Validate Tor connection
-        let proxy_config = proxy::ProxyConfig::from_config(&config);
-        match proxy_config.validate_tor_connection().await {
+        match proxy_config.init_tor_client().await {
             Ok(_) => {
-                tracing::info!("✓ Tor connection validated successfully");
+                tracing::info!("✓ Arti Tor client initialized and bootstrapped");
+                
+                // Validate connection
+                match proxy_config.validate_tor_connection().await {
+                    Ok(_) => {
+                        tracing::info!("✓ Tor connection validated successfully");
+                    }
+                    Err(e) => {
+                        tracing::error!("✗ Tor validation failed: {}", e);
+                        anyhow::bail!("Cannot start without working Tor connection");
+                    }
+                }
             }
             Err(e) => {
-                tracing::error!("✗ Tor validation failed: {}", e);
-                tracing::error!("  Make sure Tor is running on {}", config.proxy_addr);
-                tracing::error!("  Install Tor: https://www.torproject.org/download/");
-                anyhow::bail!("Cannot start without working Tor connection");
+                tracing::error!("✗ Failed to initialize Arti: {}", e);
+                tracing::error!("  Make sure you have internet connectivity");
+                anyhow::bail!("Cannot start without Tor");
             }
         }
     } else {
@@ -223,24 +218,21 @@ async fn start_node(
     
     let storage = Arc::new(storage::GitStorage::new(&config.storage_path)?);
     
-    // Initialize DHT if enabled in config
     let dht = if config.enable_dht {
         tracing::info!("🔍 Initializing DHT...");
-        let dht = dht::DHT::new(config.node_id.clone());
-        Some(dht)
+        Some(dht::DHT::new(config.node_id.clone()))
     } else {
         None
     };
- let proxy_config = crate::proxy::ProxyConfig::from_config(&config);   
- let state = NodeState {
+    
+    let state = NodeState {
         config: config.clone(),
         storage: storage.clone(),
         hosted_repos: Arc::new(RwLock::new(Vec::new())),
         stats: Arc::new(RwLock::new(NodeStats::default())),
         dht: Arc::new(RwLock::new(dht)),
-proxy: proxy_config.clone(),
+        proxy: proxy_config.clone(),
     };
-
     
     // Load existing repos
     {
@@ -252,11 +244,10 @@ proxy: proxy_config.clone(),
     
     // Register with Hyrule server
     tracing::info!("🔗 Registering with Hyrule server...");
-    match registration::register_node(&config).await {
+    match registration::register_node(&config, &proxy_config).await {
         Ok(_) => tracing::info!("✓ Successfully registered with network"),
         Err(e) => {
             tracing::warn!("⚠️  Registration failed: {}. Will retry...", e);
-            tracing::warn!("   Make sure Tor is running and the onion address is accessible");
         }
     }
     
@@ -276,7 +267,6 @@ proxy: proxy_config.clone(),
         health::monitor_storage(monitor_state).await;
     });
     
-    // DHT announcement loop
     if config.enable_dht {
         let dht_state = state.clone();
         tokio::spawn(async move {
@@ -284,7 +274,6 @@ proxy: proxy_config.clone(),
         });
     }
     
-    // Build router
     let app = api::create_router(state)
         .layer(TraceLayer::new_for_http());
     
@@ -299,7 +288,6 @@ proxy: proxy_config.clone(),
     
     Ok(())
 }
-
 
 fn init_node(output: Option<String>) -> anyhow::Result<()> {
     println!("🔑 Generating node identity...");
@@ -324,17 +312,12 @@ fn init_node(output: Option<String>) -> anyhow::Result<()> {
     println!("Node ID: {}", config.node_id);
     println!("Public Key: {}", config.public_key);
     println!("Hyrule Server: {}", config.hyrule_server);
-println!(
-    "🧅 Tor: Enabled ({})",
-    config.proxy_addr.as_str()
-);
-
+    println!("🧅 Tor: Enabled (using Arti embedded client)");
     println!();
     println!("Config saved to: {}", config_path.display());
     println!();
-    println!("⚠️  Make sure Tor is installed and running:");
-    println!("   - Install: https://www.torproject.org/download/");
-    println!("   - Default port: 9050");
+    println!("ℹ️  Arti will bootstrap automatically on first start");
+    println!("   No need to install Tor separately!");
     println!();
     println!("Start your node with:");
     println!("  hyrule-node start");
@@ -369,12 +352,7 @@ async fn show_status() -> anyhow::Result<()> {
     println!("Repositories: {}", repos.len());
     
     if config.enable_proxy {
-println!(
-    "Tor Proxy: {} (enabled: {})",
-    config.proxy_addr.as_str(),
-    config.enable_proxy
-);
-
+        println!("🧅 Tor: Enabled (Arti embedded client)");
     } else {
         println!("⚠️  Tor: Disabled");
     }
@@ -414,16 +392,17 @@ async fn serve_repo(repo_hash: String) -> anyhow::Result<()> {
     let config = config::NodeConfig::load()?;
     let storage = storage::GitStorage::new(&config.storage_path)?;
     
-    // Initialize if not exists
     if !storage.repo_path(&repo_hash).exists() {
         storage.init_repo(&repo_hash)?;
         println!("✓ Initialized local storage for {}", &repo_hash[..16]);
     }
     
-    // Build client with Tor support
-    let proxy_config = proxy::ProxyConfig::from_config(&config);
-    let client = proxy_config.build_client()?;
+    let mut proxy_config = proxy::ProxyConfig::from_config(&config);
+    if config.enable_proxy {
+        proxy_config.init_tor_client().await?;
+    }
     
+    let client = proxy_config.build_client()?;
     let url = format!("{}/api/repos/{}/replicate", config.hyrule_server, repo_hash);
     
     #[derive(serde::Serialize)]
@@ -448,10 +427,8 @@ async fn serve_repo(repo_hash: String) -> anyhow::Result<()> {
 
 async fn unserve_repo(repo_hash: String) -> anyhow::Result<()> {
     println!("📥 Removing repository from serving list...");
-    
     println!("✓ Repository {} no longer advertised", &repo_hash[..16]);
     println!("  (Data preserved in storage)");
-    
     Ok(())
 }
 
@@ -533,11 +510,11 @@ async fn test_dht(repo_hash: String, action: String) -> anyhow::Result<()> {
 }
 
 async fn test_tor() -> anyhow::Result<()> {
-    println!("🧅 Testing Tor connection...");
+    println!("🧅 Testing Arti Tor connection...");
     println!();
     
     let config = config::NodeConfig::load()?;
-    let proxy_config = proxy::ProxyConfig::from_config(&config);
+    let mut proxy_config = proxy::ProxyConfig::from_config(&config);
     
     if !proxy_config.enabled {
         println!("✗ Tor is disabled in config");
@@ -545,27 +522,34 @@ async fn test_tor() -> anyhow::Result<()> {
         return Ok(());
     }
     
-    println!("Tor proxy: {}", proxy_config.addr);
-    println!("Connecting...");
+    println!("Initializing Arti client and bootstrapping...");
     
-    match proxy_config.validate_tor_connection().await {
+    match proxy_config.init_tor_client().await {
         Ok(_) => {
-            println!();
-            println!("✓ Tor connection successful!");
-            println!("  Your traffic is being routed through the Tor network");
+            println!("✓ Arti client initialized");
+            
+            match proxy_config.validate_tor_connection().await {
+                Ok(_) => {
+                    println!();
+                    println!("✓ Tor connection successful!");
+                    println!("  Your traffic is being routed through the Tor network");
+                }
+                Err(e) => {
+                    println!();
+                    println!("✗ Tor connection validation failed: {}", e);
+                }
+            }
         }
         Err(e) => {
             println!();
-            println!("✗ Tor connection failed: {}", e);
+            println!("✗ Arti initialization failed: {}", e);
             println!();
             println!("Troubleshooting:");
-            println!("  1. Make sure Tor is installed and running");
-            println!("  2. Check that Tor is listening on {}", proxy_config.addr);
-            println!("  3. Verify your firewall allows connections to Tor");
+            println!("  1. Make sure you have internet connectivity");
+            println!("  2. Check your firewall allows outbound connections");
+            println!("  3. Arti needs to bootstrap to the Tor network");
         }
     }
     
     Ok(())
 }
-
-use colored::Colorize;

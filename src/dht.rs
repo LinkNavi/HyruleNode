@@ -3,8 +3,6 @@
 // ============================================================================
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Simple DHT for content discovery
 pub struct DHT {

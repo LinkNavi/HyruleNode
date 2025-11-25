@@ -1,9 +1,12 @@
 use crate::{registration, NodeState};
+use anyhow::Context;
 use std::time::Duration;
 use tokio::time;
+use bytes::Bytes;
 
+/// Replication loop runs periodically and attempts to replicate unhealthy repos
 pub async fn replication_loop(state: NodeState) {
-    let mut interval = time::interval(Duration::from_secs(300)); // Every 5 minutes
+    let mut interval = time::interval(Duration::from_secs(300)); // every 5 minutes
 
     loop {
         interval.tick().await;
@@ -20,14 +23,15 @@ pub async fn replication_loop(state: NodeState) {
 
 async fn check_and_replicate(state: &NodeState) -> anyhow::Result<()> {
     let proxy_config = crate::proxy::ProxyConfig::from_config(&state.config);
-    let client = proxy_config.build_client()?;
+    // build_client() returns your HyruleClient wrapper
+    let client = proxy_config.build_client()?; // HyruleClient
 
-    // Get list of unhealthy repos from server
+    // get list of unhealthy repos from server
     let url = format!("{}/api/repos?unhealthy=true", state.config.hyrule_server);
-
     let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
+        // nothing to do
         return Ok(());
     }
 
@@ -42,10 +46,11 @@ async fn check_and_replicate(state: &NodeState) -> anyhow::Result<()> {
         unhealthy_repos.len()
     );
 
-    // Get current storage usage
+    // Get current storage usage and available space
     let storage_used = state.storage.get_storage_usage()?;
     let storage_available = state.config.storage_capacity.saturating_sub(storage_used);
 
+    // snapshot hosted repos
     let hosted = state.hosted_repos.read().await.clone();
 
     for repo_hash in unhealthy_repos {
@@ -62,7 +67,7 @@ async fn check_and_replicate(state: &NodeState) -> anyhow::Result<()> {
 
                 match replicate_repo(state, &repo_hash, &client).await {
                     Ok(_) => {
-                        tracing::info!(" Successfully replicated {}", &repo_hash[..8]);
+                        tracing::info!("Successfully replicated {}", &repo_hash[..8]);
 
                         // Update stats
                         {
@@ -96,7 +101,7 @@ async fn announce_replica(
     server: &str,
     node_id: &str,
     repo_hash: &str,
-    client: &reqwest::Client,
+    client: &crate::http_client::HyruleClient,
 ) -> anyhow::Result<()> {
     let url = format!("{}/api/repos/{}/replicate", server, repo_hash);
 
@@ -117,10 +122,11 @@ async fn announce_replica(
 
     Ok(())
 }
+
 async fn replicate_repo(
     state: &NodeState,
     repo_hash: &str,
-    client: &reqwest::Client,
+    client: &crate::http_client::HyruleClient,
 ) -> anyhow::Result<()> {
     tracing::info!("Starting replication of {}...", &repo_hash[..8]);
 
@@ -155,14 +161,14 @@ async fn fetch_repo_from_peer(
     state: &NodeState,
     repo_hash: &str,
     peer: &registration::PeerNode,
-    client: &reqwest::Client,
+    client: &crate::http_client::HyruleClient,
 ) -> anyhow::Result<()> {
     let peer_url = format!("http://{}:{}", peer.address, peer.port);
 
     // Initialize repo locally
     state.storage.init_repo(repo_hash)?;
 
-    // Get list of objects from peer
+    // Get list of objects from peer (JSON)
     let objects_url = format!("{}/repos/{}/objects", peer_url, repo_hash);
     let response = client.get(&objects_url).send().await?;
 
@@ -179,14 +185,24 @@ async fn fetch_repo_from_peer(
 
     tracing::info!("Fetching {} objects from peer...", obj_list.objects.len());
 
-    // Download each object
+    // We'll use a plain reqwest::Client to fetch raw object bytes.
+    // (Reason: your HyruleResponse wrapper does not expose `.bytes()`.)
+    // This bypasses any special behavior HyruleClient applies (tor/proxy). If you need
+    // Tor/proxy for object downloads, we can add a `get_raw_bytes` helper on HyruleClient.
+    let raw_client = reqwest::Client::new();
+
     for object_id in obj_list.objects {
         let obj_url = format!("{}/repos/{}/objects/{}", peer_url, repo_hash, object_id);
 
-        match client.get(&obj_url).send().await {
+        match raw_client.get(&obj_url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let data = resp.bytes().await?;
-                state.storage.store_object(repo_hash, &object_id, &data)?;
+                let data: Bytes = resp
+                    .bytes()
+                    .await
+                    .context("reading object bytes from peer")?;
+                state
+                    .storage
+                    .store_object(repo_hash, &object_id, data.as_ref())?;
             }
             Ok(resp) => {
                 tracing::warn!(
@@ -201,14 +217,14 @@ async fn fetch_repo_from_peer(
         }
     }
 
-    tracing::info!(" Completed replication from peer {}", &peer.node_id[..8]);
+    tracing::info!("Completed replication from peer {}", &peer.node_id[..8]);
     Ok(())
 }
 
 async fn get_repo_size(
     server: &str,
     repo_hash: &str,
-    client: &reqwest::Client,
+    client: &crate::http_client::HyruleClient,
 ) -> anyhow::Result<u64> {
     let url = format!("{}/api/repos/{}", server, repo_hash);
     let response = client.get(&url).send().await?;
@@ -229,7 +245,7 @@ async fn get_repo_size(
 async fn get_repo_nodes(
     server: &str,
     repo_hash: &str,
-    client: &reqwest::Client,
+    client: &crate::http_client::HyruleClient,
 ) -> anyhow::Result<Vec<registration::PeerNode>> {
     let url = format!("{}/api/repos/{}/nodes", server, repo_hash);
     let response = client.get(&url).send().await?;

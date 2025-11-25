@@ -1,82 +1,96 @@
-// ============================================================================
-// Node/src/proxy.rs - Tor Proxy Support Module
-// ============================================================================
+// src/proxy.rs
+
+use arti_client::{TorClient, TorClientConfig};
+use arti_hyper::ArtiHttpConnector;
+use tor_rtcompat::tokio::TokioNativeTlsRuntime;
+use tls_api::{TlsConnector as TlsConnectorTrait, TlsConnectorBuilder}; // Added Builder trait
+use tls_api_native_tls::TlsConnector;
+use anyhow::Result;
+use std::sync::Arc;
+use hyper::{Client as HyperClient, Body};
+
+// Import our new wrapper
+use crate::http_client::HyruleClient;
+
+// We keep the raw type alias for internal use if needed
+type InnerHttpClient = HyperClient<ArtiHttpConnector<TokioNativeTlsRuntime, TlsConnector>, Body>;
+
 #[derive(Clone)]
 pub struct ProxyConfig {
     pub enabled: bool,
     pub addr: String,
+    tor_client: Option<Arc<TorClient<TokioNativeTlsRuntime>>>,
 }
 
 impl ProxyConfig {
     pub fn from_config(config: &crate::config::NodeConfig) -> Self {
         Self {
             enabled: config.enable_proxy,
-addr: if config.proxy_addr.is_empty() {
-    "127.0.0.1:9050".to_string()
-} else {
-    config.proxy_addr.clone()
-},
-
+            addr: if config.proxy_addr.is_empty() {
+                "127.0.0.1:9050".to_string()
+            } else {
+                config.proxy_addr.clone()
+            },
+            tor_client: None,
         }
     }
     
-    /// Create HTTP client with SOCKS5 proxy (Tor)
-    /// This enforces all traffic goes through Tor when enabled
-    pub fn build_client(&self) -> reqwest::Result<reqwest::Client> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60)) // Longer timeout for Tor
-            .danger_accept_invalid_certs(false); // Still validate certs
-        
-        if self.enabled {
-            // Route through SOCKS5 proxy (Tor)
-            let proxy = reqwest::Proxy::all(&format!("socks5h://{}", self.addr))?;
-            builder = builder.proxy(proxy);
-            
-            tracing::debug!("HTTP client configured to use Tor at {}", self.addr);
-        } else {
-            tracing::warn!("Proxy disabled - traffic will NOT be routed through Tor!");
-        }
-        
-        builder.build()
-    }
-    
-    /// Build a client that REQUIRES Tor (fails if proxy not enabled)
-    pub fn build_tor_client(&self) -> anyhow::Result<reqwest::Client> {
+    pub async fn init_tor_client(&mut self) -> Result<()> {
         if !self.enabled {
-            anyhow::bail!("Tor proxy must be enabled for this operation");
+            return Ok(());
         }
-        
-        let proxy = reqwest::Proxy::all(&format!("socks5h://{}", self.addr))?;
-        
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .proxy(proxy)
-            .danger_accept_invalid_certs(false)
-            .build()?;
-        
-        Ok(client)
-    }
-    
-    /// Validate that Tor is accessible
-    pub async fn validate_tor_connection(&self) -> anyhow::Result<()> {
-        if !self.enabled {
-            anyhow::bail!("Tor proxy is not enabled");
-        }
-        
-        let client = self.build_tor_client()?;
-        
-        // Try to connect to check.torproject.org to verify Tor connection
-        tracing::info!("Validating Tor connection...");
-        
-        let response = client
-.get("http://hyrule4e3tu7pfdkvvca43senvgvgisi6einpe3d3kpidlk3uyjf7lqd.onion/")
-
-            .send()
+        tracing::info!("🧅 Bootstrapping Arti Tor client...");
+        let config = TorClientConfig::default();
+        let runtime = TokioNativeTlsRuntime::current()?;
+        let tor_client = TorClient::with_runtime(runtime)
+            .config(config)
+            .create_bootstrapped()
             .await?;
-        
-tracing::info!("✓ Tor connection OK (status: {})", response.status());
-Ok(())
+        tracing::info!("✓ Arti Tor client bootstrapped successfully");
+        self.tor_client = Some(Arc::new(tor_client));
+        Ok(())
+    }
+    
+    pub fn get_tor_client(&self) -> Option<Arc<TorClient<TokioNativeTlsRuntime>>> {
+        self.tor_client.clone()
+    }
+    
+    // CHANGED: Return HyruleClient instead of generic Hyper Client
+pub fn build_client(&self) -> Result<HyruleClient> {
+    if !self.enabled || self.tor_client.is_none() {
+        anyhow::bail!("Tor is not enabled or not initialized");
+    }
 
+    // deref Arc and clone to get TorClient
+    let tor_client = (**self.tor_client.as_ref().unwrap()).clone();
 
+    // Build TLS connector
+    let tls_conn = <TlsConnector as TlsConnectorTrait>::builder()?.build()?;
+
+    // Create connector
+    let connector = ArtiHttpConnector::new(tor_client, tls_conn);
+
+    // Build Hyper client
+    let inner_client = HyperClient::builder().build(connector);
+
+    Ok(HyruleClient::new(inner_client))
+}
+    
+    pub fn build_tor_client(&self) -> Result<HyruleClient> {
+        self.build_client()
+    }
+
+    // validate_tor_connection remains unchanged...
+    pub async fn validate_tor_connection(&self) -> Result<()> {
+        if !self.enabled || self.tor_client.is_none() {
+            anyhow::bail!("Tor is not enabled");
+        }
+        let tor_client = self.tor_client.as_ref().unwrap();
+        let test_addr = ("hyrule4e3tu7pfdkvvca43senvgvgisi6einpe3d3kpidlk3uyjf7lqd.onion", 80);
+        match tokio::time::timeout(std::time::Duration::from_secs(30), tor_client.connect(test_addr)).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => anyhow::bail!("Tor connection failed: {}", e),
+            Err(_) => anyhow::bail!("Tor connection timed out"),
+        }
     }
 }

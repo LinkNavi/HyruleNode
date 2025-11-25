@@ -18,12 +18,9 @@ struct RegisterNodeResponse {
 }
 
 /// Register this node with the Hyrule server
-pub async fn register_node(config: &NodeConfig) -> anyhow::Result<()> {
-    // Build client with Tor support
-    let proxy_config = crate::proxy::ProxyConfig::from_config(config);
-    let client = proxy_config.build_client()?;
+pub async fn register_node(config: &NodeConfig, proxy: &crate::proxy::ProxyConfig) -> anyhow::Result<()> {
+    let client = proxy.build_client()?;
     
-    // Use the public_address() method from config
     let address = config.public_address();
     
     let request = RegisterNodeRequest {
@@ -54,9 +51,8 @@ pub async fn register_node(config: &NodeConfig) -> anyhow::Result<()> {
 }
 
 /// Discover peer nodes from the network
-pub async fn discover_peers(config: &NodeConfig) -> anyhow::Result<Vec<PeerNode>> {
-    let proxy_config = crate::proxy::ProxyConfig::from_config(config);
-    let client = proxy_config.build_client()?;
+pub async fn discover_peers(config: &NodeConfig, proxy: &crate::proxy::ProxyConfig) -> anyhow::Result<Vec<PeerNode>> {
+    let client = proxy.build_client()?;
     
     let url = format!("{}/api/nodes", config.hyrule_server);
     
