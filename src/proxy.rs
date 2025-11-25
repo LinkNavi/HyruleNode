@@ -1,4 +1,4 @@
-k// ============================================================================
+// ============================================================================
 // Node/src/proxy.rs - Tor Proxy Support Module
 // ============================================================================
 
@@ -11,7 +11,12 @@ impl ProxyConfig {
     pub fn from_config(config: &crate::config::NodeConfig) -> Self {
         Self {
             enabled: config.enable_proxy,
-            addr: config.proxy_addr.clone().unwrap_or_else(|| "127.0.0.1:9050".to_string()),
+addr: if config.proxy_addr.is_empty() {
+    "127.0.0.1:9050".to_string()
+} else {
+    config.proxy_addr.clone()
+},
+
         }
     }
     
@@ -64,20 +69,14 @@ impl ProxyConfig {
         tracing::info!("Validating Tor connection...");
         
         let response = client
-            .get("https://check.torproject.org/api/ip")
+.get("http://hyrule4e3tu7pfdkvvca43senvgvgisi6einpe3d3kpidlk3uyjf7lqd.onion/")
+
             .send()
             .await?;
         
-        if response.status().is_success() {
-            let body = response.text().await?;
-            if body.contains("\"IsTor\":true") {
-                tracing::info!("✓ Successfully connected through Tor network");
-                Ok(())
-            } else {
-                anyhow::bail!("Connected but not through Tor - check your proxy settings")
-            }
-        } else {
-            anyhow::bail!("Failed to validate Tor connection: {}", response.status())
-        }
+tracing::info!("✓ Tor connection OK (status: {})", response.status());
+Ok(())
+
+
     }
 }

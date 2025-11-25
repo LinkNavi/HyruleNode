@@ -24,12 +24,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-Commands::Start { 
-    port, server, storage_path, capacity, anchor, 
-    enable_dht, disable_tor, proxy_addr 
-} => {
-    start_node(port, server, storage_path, capacity, anchor, enable_dht, disable_tor, proxy_addr).await?;
-}    
+    /// Start the node
+    Start {
+        #[arg(short, long)]
+        port: Option<u16>,
+        
+        #[arg(short, long)]
+        server: Option<String>,
+        
+        #[arg(long)]
+        storage_path: Option<String>,
+        
+        #[arg(long)]
+        capacity: Option<u64>,
+        
+        #[arg(long)]
+        anchor: bool,
+        
+        #[arg(long)]
+        enable_dht: bool,
+        
+        #[arg(long)]
+        disable_tor: bool,
+        
+        #[arg(long)]
+        proxy_addr: Option<String>,
+    },
+    
     Init {
         #[arg(short, long)]
         output: Option<String>,
@@ -67,7 +88,6 @@ Commands::Start {
     /// Test Tor connection
     TestTor,
 }
-
 #[derive(Clone)]
 pub struct NodeState {
     config: config::NodeConfig,
@@ -145,65 +165,39 @@ async fn start_node(
 ) -> anyhow::Result<()> {
     tracing::info!("🧅 Starting Hyrule Storage Node v0.2.0 (Tor Edition)");
     
-    let mut config = config::NodeConfig:::load_or_create()?;
-    let mut config_changed = false;
+    // Load existing config - this will NOT override values
+    let mut config = config::NodeConfig::load_or_create()?;
     
-    // Only update config if values were explicitly provided via CLI
-    if let Some(srv) = server {
-        config.hyrule_server = srv;
-        config_changed = true;
-    }
+    // Determine if --disable-tor was explicitly passed
+    // enable_tor parameter represents the OPPOSITE of --disable-tor flag
+    // So if enable_tor is false, it means --disable-tor was passed
+    let disable_tor_flag_passed = !enable_tor;
     
-    if let Some(p) = port {
-        config.port = p;
-        config_changed = true;
-    }
+    // Update config ONLY with explicitly provided CLI arguments
+    // Note: is_anchor and enable_dht are always passed by clap even if not specified
+    // So we need to check if they're different from current config
+    let config_changed = config.update_and_save(
+        server,
+        port,
+        storage_path,
+        capacity_gb,
+        None, // Don't auto-update is_anchor unless explicitly needed
+        if disable_tor_flag_passed { Some(false) } else { None },
+        proxy_addr,
+        None, // Don't auto-update enable_dht unless explicitly needed
+    )?;
     
-    if let Some(path) = storage_path {
-        config.storage_path = path;
-        config_changed = true;
-    }
-    
-    if let Some(cap) = capacity_gb {
-        config.storage_capacity = cap * 1024 * 1024 * 1024;
-        config_changed = true;
-    }
-    
-    // REMOVED: The problematic is_anchor check that was always triggering
-    // Only update if explicitly passed as flag
-    // Note: Clap's bool flags need special handling
-    
-    // FIXED: Only disable Tor if the --disable-tor flag was EXPLICITLY passed
-    // The enable_tor parameter is actually !disable_tor from the CLI
-    // So we only modify config if disable_tor was passed (enable_tor == false)
-    if !enable_tor {
-        config.enable_proxy = false;
-        config.enable_onion_routing = false;
-        config_changed = true;
-    }
-    
-    if let Some(addr) = proxy_addr {
-        config.proxy_addr = Some(addr);
-        config_changed = true;
-    }
-    
-    // FIXED: Only update enable_dht if it was explicitly enabled via CLI
-    // We need to check if the user actually passed --enable-dht
-    // This requires changing the CLI arg to be Option<bool> instead
-    
-    // Save config ONLY if something actually changed
     if config_changed {
-        config.save()?;
         tracing::info!("💾 Configuration updated and saved");
     }
     
     tracing::info!("📁 Storage path: {}", config.storage_path);
-    tracing::info!("💾 Capacity: {:.2} GB", config.storage_capacity as f64 / 1e9);
+    tracing::info!("💾 Capacity: {:.2} GB", config.storage_capacity_gb());
     tracing::info!("🆔 Node ID: {}", &config.node_id[..16]);
     tracing::info!("🏷️  Type: {}", if config.is_anchor { "Anchor Node" } else { "P2P Node" });
     
     if config.enable_proxy {
-        tracing::info!("🧅 Tor enabled: {}", config.proxy_addr.as_ref().unwrap());
+        tracing::info!("🧅 Tor enabled: {}", config.proxy_addr);
         tracing::info!("🌐 Hyrule server: {}", config.hyrule_server);
         
         // Validate Tor connection
@@ -214,7 +208,7 @@ async fn start_node(
             }
             Err(e) => {
                 tracing::error!("✗ Tor validation failed: {}", e);
-                tracing::error!("  Make sure Tor is running on {}", config.proxy_addr.as_ref().unwrap());
+                tracing::error!("  Make sure Tor is running on {}", config.proxy_addr);
                 tracing::error!("  Install Tor: https://www.torproject.org/download/");
                 anyhow::bail!("Cannot start without working Tor connection");
             }
@@ -226,9 +220,8 @@ async fn start_node(
     
     let storage = Arc::new(storage::GitStorage::new(&config.storage_path)?);
     
-    // Initialize DHT if enabled in config OR via CLI flag
-    let should_enable_dht = enable_dht || config.enable_dht;
-    let dht = if should_enable_dht {
+    // Initialize DHT if enabled in config
+    let dht = if config.enable_dht {
         tracing::info!("🔍 Initializing DHT...");
         let dht = dht::DHT::new(config.node_id.clone());
         Some(dht)
@@ -279,7 +272,7 @@ async fn start_node(
     });
     
     // DHT announcement loop
-    if should_enable_dht {
+    if config.enable_dht {
         let dht_state = state.clone();
         tokio::spawn(async move {
             dht::announcement_loop(dht_state).await;
@@ -326,7 +319,11 @@ fn init_node(output: Option<String>) -> anyhow::Result<()> {
     println!("Node ID: {}", config.node_id);
     println!("Public Key: {}", config.public_key);
     println!("Hyrule Server: {}", config.hyrule_server);
-    println!("Tor Proxy: {} (enabled: {})", config.proxy_addr.as_ref().unwrap(), config.enable_proxy);
+println!(
+    "🧅 Tor: Enabled ({})",
+    config.proxy_addr.as_str()
+);
+
     println!();
     println!("Config saved to: {}", config_path.display());
     println!();
@@ -367,7 +364,12 @@ async fn show_status() -> anyhow::Result<()> {
     println!("Repositories: {}", repos.len());
     
     if config.enable_proxy {
-        println!("🧅 Tor: Enabled ({})", config.proxy_addr.as_ref().unwrap());
+println!(
+    "Tor Proxy: {} (enabled: {})",
+    config.proxy_addr.as_str(),
+    config.enable_proxy
+);
+
     } else {
         println!("⚠️  Tor: Disabled");
     }

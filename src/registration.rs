@@ -19,10 +19,12 @@ struct RegisterNodeResponse {
 
 /// Register this node with the Hyrule server
 pub async fn register_node(config: &NodeConfig) -> anyhow::Result<()> {
-    let client = reqwest::Client::new();
+    // Build client with Tor support
+    let proxy_config = crate::proxy::ProxyConfig::from_config(config);
+    let client = proxy_config.build_client()?;
     
-    // Get local IP address (or use configured address)
-let address = config.public_address.clone();
+    // Use the public_address() method from config
+    let address = config.public_address();
     
     let request = RegisterNodeRequest {
         node_id: config.node_id.clone(),
@@ -37,6 +39,7 @@ let address = config.public_address.clone();
     let response = client
         .post(&url)
         .json(&request)
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await?;
     
@@ -45,32 +48,23 @@ let address = config.public_address.clone();
     }
     
     let result: RegisterNodeResponse = response.json().await?;
-    tracing::info!(" {}", result.message);
+    tracing::info!("✓ {}", result.message);
     
     Ok(())
 }
 
-/// Get local IP address
-fn get_local_ip() -> Option<String> {
-    // Try to get external IP by connecting to a known server
-    use std::net::TcpStream;
-    
-    if let Ok(stream) = TcpStream::connect("8.8.8.8:80") {
-        if let Ok(addr) = stream.local_addr() {
-            return Some(addr.ip().to_string());
-        }
-    }
-    
-    // Fallback to localhost
-    Some("127.0.0.1".to_string())
-}
-
 /// Discover peer nodes from the network
 pub async fn discover_peers(config: &NodeConfig) -> anyhow::Result<Vec<PeerNode>> {
-    let client = reqwest::Client::new();
+    let proxy_config = crate::proxy::ProxyConfig::from_config(config);
+    let client = proxy_config.build_client()?;
+    
     let url = format!("{}/api/nodes", config.hyrule_server);
     
-    let response = client.get(&url).send().await?;
+    let response = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await?;
     
     if !response.status().is_success() {
         anyhow::bail!("Failed to discover peers");
